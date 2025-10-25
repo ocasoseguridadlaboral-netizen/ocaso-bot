@@ -5,8 +5,11 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 import uvicorn
 
-from telegram import Update, InputFile
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InputFile, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application, ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, CallbackQueryHandler, filters
+)
 from telegram.constants import ParseMode
 
 from reportlab.lib.pagesizes import A4
@@ -17,7 +20,7 @@ from reportlab.lib.utils import ImageReader
 from dotenv import load_dotenv
 from rapidfuzz import fuzz
 
-# ==== IA opcional (no necesaria para este flujo, solo si quieres activarla) ====
+# ==== IA opcional ====
 try:
     from openai import OpenAI
 except Exception:
@@ -31,7 +34,6 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_SA_JSON_PATH = os.getenv("GOOGLE_SA_JSON_PATH")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-# rutas robustas para assets
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOGO_PATH_PNG = os.path.join(BASE_DIR, "assets", "logo.png")
 LOGO_PATH_JPG = os.path.join(BASE_DIR, "assets", "logo.jpg")
@@ -40,7 +42,6 @@ if not TELEGRAM_TOKEN or not SPREADSHEET_ID or not GOOGLE_SA_JSON_PATH:
     raise RuntimeError("Faltan envs: TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_SA_JSON_PATH")
 
 # ==== Datos de la empresa ====
-EMPRESA_SUB    = "OCASO – Ropa de trabajo"
 EMPRESA_NOMBRE = "Zabalza Gladys Beatriz"
 EMPRESA_CUIT   = "CUIT: 27-13058782-3"
 EMPRESA_DIR    = "Castelli 45 - San Vicente, Buenos Aires"
@@ -88,7 +89,7 @@ def fetch_catalog() -> List[Dict[str, Any]]:
 
     return out
 
-# ==== Parser de ítems ====
+# ==== Parser ====
 ITEM_SEP = re.compile(r"[,\n;]+", re.I)
 QTY_PAT  = re.compile(r"(?:x\s*(\d+))|(?:(\d+)\s*(?:u|unid|unidades)?)", re.I)
 
@@ -125,11 +126,7 @@ def parse_items(text: str, catalog: List[Dict[str,Any]]) -> Tuple[List[Tuple[Dic
 
 # ==== Logo & encabezado ====
 def load_logo_imagereader() -> Optional[ImageReader]:
-    path = None
-    if os.path.exists(LOGO_PATH_PNG):
-        path = LOGO_PATH_PNG
-    elif os.path.exists(LOGO_PATH_JPG):
-        path = LOGO_PATH_JPG
+    path = LOGO_PATH_PNG if os.path.exists(LOGO_PATH_PNG) else (LOGO_PATH_JPG if os.path.exists(LOGO_PATH_JPG) else None)
     if path:
         try:
             with open(path, "rb") as f:
@@ -145,7 +142,8 @@ def load_logo_imagereader() -> Optional[ImageReader]:
 LOGO_IR = load_logo_imagereader()
 
 TOP_MARGIN_MM = 15
-HEADER_BLOCK_HEIGHT_MM = 30  # alto del bloque
+# Bloque más alto para alojar logo grande y todos los datos antes de la línea separadora:
+HEADER_BLOCK_HEIGHT_MM = 50
 
 def draw_footer(c: canvas.Canvas):
     W, H = A4
@@ -157,9 +155,10 @@ def draw_footer(c: canvas.Canvas):
 def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     """
     Encabezado:
-      - Izquierda: logo + datos empresa
+      - Izquierda: logo (64x28mm) + datos empresa
       - Derecha (arriba): Fecha/Hora + Nº (chico)
       - Debajo, derecha: título grande
+      - Línea separadora DESPUÉS de Tel/Mail
       - Retorna Y inicial para contenido
     """
     W, H = A4
@@ -168,23 +167,20 @@ def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     x_right = W - 15*mm
     y = top
 
-    # Logo (prioriza png, luego jpg)
+    # Logo grande (doble)
     if LOGO_IR:
         try:
-            c.drawImage(LOGO_IR, x_left, y - 14*mm, width=32*mm, height=14*mm,
+            c.drawImage(LOGO_IR, x_left, y - 28*mm, width=64*mm, height=28*mm,
                         preserveAspectRatio=True, mask='auto')
-            y -= 16*mm
+            y -= 30*mm  # espacio posteado
         except Exception as e:
             print("[logo] drawImage error:", e)
 
-    # Datos empresa
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(x_left, y, EMPRESA_SUB); y -= 5*mm
-
+    # Datos empresa (sin "subnombre" para evitar redundancia)
     c.setFont("Helvetica", 10)
-    c.drawString(x_left, y, EMPRESA_NOMBRE); y -= 4.5*mm
-    c.drawString(x_left, y, EMPRESA_CUIT);   y -= 4.5*mm
-    c.drawString(x_left, y, EMPRESA_DIR);    y -= 4.5*mm
+    c.drawString(x_left, y, EMPRESA_NOMBRE); y -= 5*mm
+    c.drawString(x_left, y, EMPRESA_CUIT);   y -= 5*mm
+    c.drawString(x_left, y, EMPRESA_DIR);    y -= 5*mm
     c.drawString(x_left, y, f"{EMPRESA_TEL} | {EMPRESA_MAIL}")
 
     # Derecha: Fecha/Hora y Nº (chico)
@@ -193,11 +189,11 @@ def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     c.drawRightString(x_right, top,        f"Fecha: {now_str}")
     c.drawRightString(x_right, top - 5*mm, f"Nº: {doc_id}")
 
-    # Título grande a la derecha
+    # Título grande a la derecha (ligeramente más abajo para armonizar con el logo)
     c.setFont("Helvetica-Bold", 16)
-    c.drawRightString(x_right, top - 12*mm, doc_label)
+    c.drawRightString(x_right, top - 14*mm, doc_label)
 
-    # Línea separadora
+    # Línea separadora (ahora seguro debajo de Tel/Mail)
     sep_y = H - (TOP_MARGIN_MM + HEADER_BLOCK_HEIGHT_MM)*mm
     c.setLineWidth(0.6)
     c.line(15*mm, sep_y, x_right, sep_y)
@@ -206,10 +202,6 @@ def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
 
 # ==== PDFs ====
 def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int]], desc_pct: float) -> bytes:
-    """
-    Aplica el descuento al PRECIO UNITARIO de cada renglón (oculto).
-    No se muestra fila de 'Descuento'. Solo TOTAL.
-    """
     buf = io.BytesIO()
     c = canvas.Canvas(buf, pagesize=A4)
     W, H = A4
@@ -233,7 +225,6 @@ def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int
     for prod, qty in items:
         price_unit = float(prod["Precio"]) * (1 - float(desc_pct)/100.0)  # descuento oculto
         if y < 30*mm:
-            # footer de página anterior
             draw_footer(c)
             c.showPage()
             content_y = draw_header(c, "Presupuesto", p_id)
@@ -253,7 +244,6 @@ def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int
         total += price_unit * qty
         y -= 6*mm
 
-    # Total
     y -= 4*mm
     c.setLineWidth(0.4); c.line(120*mm, y, 190*mm, y)
     y -= 8*mm
@@ -261,7 +251,6 @@ def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int
     c.drawString(120*mm, y, "TOTAL:")
     c.drawRightString(190*mm, y, f"${total:,.2f}")
 
-    # footer última página
     draw_footer(c)
     c.showPage()
     c.save()
@@ -313,15 +302,14 @@ def pdf_remito(r_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int]]) -
 def new_id(prefix: str) -> str:
     return f"{prefix}-{datetime.datetime.now().strftime('%Y%m%d-%H%M')}-{random.randint(1000,9999)}"
 
-# ==== Bot (Telegram) ====
+# ==== Bot ====
 app = FastAPI()
-# Deshabilitamos updater (polling); usaremos webhook en producción
 bot_app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).updater(None).build()
 
 # Estados
 ASK_CLIENT="ASK_CLIENT"
 ASK_ITEMS="ASK_ITEMS"
-ASK_REVIEW="ASK_REVIEW"   # << nuevo paso de confirmación/edición
+ASK_REVIEW="ASK_REVIEW"
 ASK_DISC="ASK_DISC"
 FLOW="FLOW"
 
@@ -329,18 +317,12 @@ def render_items_list(pairs: List[Tuple[Dict[str,Any],int]]) -> str:
     return "\n".join([f"- {p['Producto']} x {q}" for p,q in pairs]) or "(sin ítems)"
 
 def apply_corrections(current: List[Tuple[Dict[str,Any],int]], msg: str, catalog: List[Dict[str,Any]]) -> List[Tuple[Dict[str,Any],int]]:
-    """
-    Reglas simples:
-      - 'eliminar <desc>' -> elimina ítem por mejor coincidencia
-      - '<desc> x <cant>' o '<desc> <cant>' -> agrega o reemplaza cantidad
-    """
     items = current[:]
     lines = [ln.strip() for ln in re.split(r"[,\n;]+", msg) if ln.strip()]
     for ln in lines:
         m = re.match(r"(?i)^eliminar\s+(.+)$", ln)
         if m:
             target = m.group(1).strip()
-            # buscar mejor match dentro de la lista actual
             best_i = -1; best_score = -1
             for i,(prod,qty) in enumerate(items):
                 sc = fuzz.WRatio(target.lower(), prod["Producto"].lower())
@@ -349,11 +331,9 @@ def apply_corrections(current: List[Tuple[Dict[str,Any],int]], msg: str, catalog
             if best_i >= 0:
                 items.pop(best_i)
             continue
-        # intentar parsear como item nuevo/modificación
         frag, qty = extract_qty(ln)
         match = best_match(frag, catalog)
         if match:
-            # si ya existe, reemplaza cantidad; si no, agrega
             replaced = False
             for i,(prod,old_q) in enumerate(items):
                 if prod["Producto"].lower() == match["Producto"].lower():
@@ -364,16 +344,23 @@ def apply_corrections(current: List[Tuple[Dict[str,Any],int]], msg: str, catalog
                 items.append((match, qty))
     return items
 
+def review_keyboard() -> InlineKeyboardMarkup:
+    kb = [
+        [InlineKeyboardButton("✅ Confirmar", callback_data="confirm"),
+         InlineKeyboardButton("✏️ Editar", callback_data="edit")]
+    ]
+    return InlineKeyboardMarkup(kb)
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Bot de Presupuestos & Remitos*\n\n"
         "Comandos:\n"
-        "• /presupuesto → cliente → ítems → revisión/edición → descuento (oculto por renglón) → PDF con precios\n"
-        "• /remito → cliente → ítems → revisión/edición → PDF sin precios\n\n"
+        "• /presupuesto → cliente → ítems → revisión → descuento (oculto) → PDF\n"
+        "• /remito → cliente → ítems → revisión → PDF sin precios\n\n"
         "Ejemplo:\n`2 pantalones cargo 42 verde, remera negra L x1`\n\n"
-        "Durante la revisión podés enviar correcciones, p.ej.:\n"
-        "• `eliminar remera negra`\n"
-        "• `remera negra L x 2` (cambia cantidad o agrega)",
+        "En revisión podés:\n"
+        "• `eliminar <descripción>`\n"
+        "• `<descripción> x <cantidad>`",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -388,7 +375,7 @@ async def cmd_remito(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg=(update.message.text or "").strip()
 
-    # Paso 1: cliente
+    # Cliente
     if context.user_data.get(ASK_CLIENT):
         context.user_data["cliente"]=msg
         context.user_data.pop(ASK_CLIENT,None)
@@ -398,7 +385,7 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         ); return
 
-    # Paso 2: entrada de ítems -> pasa a revisión
+    # Ítems -> revisión (con botones)
     if context.user_data.get(ASK_ITEMS):
         catalog = fetch_catalog()
         pairs, warnings = parse_items(msg, catalog)
@@ -417,36 +404,19 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         warning_text = ("\n\n" + " ".join(warnings)) if warnings else ""
         await update.message.reply_text(
             f"Revisión de ítems:\n{lista}{warning_text}\n\n"
-            "¿Está bien? Respondé *ok* para continuar o enviá correcciones.\n"
-            "_Correcciones válidas:_\n"
-            "• `eliminar <descripción>`\n"
-            "• `<descripción> x <cantidad>` (agrega o cambia cantidad)",
-            parse_mode=ParseMode.MARKDOWN
+            "Usá los botones para *Confirmar* o *Editar*. También podés enviar correcciones por texto.",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=review_keyboard()
         ); return
 
-    # Paso 3: revisión/edición (bucle hasta 'ok')
+    # Revisión/edición por texto (sigue vigente además de los botones)
     if context.user_data.get(ASK_REVIEW):
         if msg.lower() in ["ok", "listo", "confirmar", "sí", "si"]:
-            context.user_data.pop(ASK_REVIEW, None)
-            if context.user_data.get(FLOW)=="PRESU":
-                context.user_data[ASK_DISC]=True
-                await update.message.reply_text(
-                    "Perfecto. ¿Qué *% de descuento* aplico? (0–100)\n"
-                    "*(el descuento no se mostrará; se aplica por renglón)*",
-                    parse_mode=ParseMode.MARKDOWN
-                ); return
-            else:
-                # remito directo
-                r_id=new_id("R")
-                pdf=pdf_remito(r_id, context.user_data.get("cliente",""), context.user_data.get("items",[]))
-                await update.message.reply_document(
-                    document=InputFile(io.BytesIO(pdf), filename=f"Remito_{r_id}.pdf"),
-                    caption=f"Remito {r_id} listo ✅"
-                )
-                context.user_data.clear()
-                return
+            # Simular confirmación
+            await handle_confirm(update, context)
+            return
         else:
-            # aplicar correcciones y volver a mostrar lista
+            # Aplicar correcciones y volver a mostrar teclado
             catalog = context.user_data.get("catalog", fetch_catalog())
             current = context.user_data.get("items", [])
             updated = apply_corrections(current, msg, catalog)
@@ -454,11 +424,12 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lista = render_items_list(updated)
             await update.message.reply_text(
                 f"Lista actualizada:\n{lista}\n\n"
-                "¿Está bien? Respondé *ok* para continuar o enviá más correcciones.",
-                parse_mode=ParseMode.MARKDOWN
+                "¿Seguimos? Usá *Confirmar* o *Editar*, o mandá más correcciones.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=review_keyboard()
             ); return
 
-    # Paso 4: descuento y emisión de presupuesto
+    # Descuento y emisión
     if context.user_data.get(ASK_DISC):
         try:
             d=float(msg.replace(",","."))
@@ -476,13 +447,66 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Usá /presupuesto o /remito.")
 
+# --- Botones de revisión ---
+async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = (query.data or "").lower()
+
+    if not context.user_data.get(ASK_REVIEW):
+        await query.edit_message_reply_markup(reply_markup=None)
+        return
+
+    if data == "confirm":
+        # Confirmar
+        await handle_confirm(update, context, from_button=True)
+    elif data == "edit":
+        # Indicar cómo editar (el estado se mantiene en ASK_REVIEW)
+        await query.edit_message_reply_markup(reply_markup=None)
+        await query.message.reply_text(
+            "Enviá correcciones. Ejemplos:\n"
+            "• `eliminar remera negra`\n"
+            "• `remera negra L x 2`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await query.edit_message_reply_markup(reply_markup=None)
+
+async def handle_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE, from_button: bool=False):
+    # limpiar teclado si vino de botón
+    if from_button and update.callback_query:
+        try:
+            await update.callback_query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+    context.user_data.pop(ASK_REVIEW, None)
+    if context.user_data.get(FLOW)=="PRESU":
+        context.user_data[ASK_DISC]=True
+        await (update.callback_query.message.reply_text if from_button else update.message.reply_text)(
+            "Perfecto. ¿Qué *% de descuento* aplico? (0–100)\n"
+            "*(el descuento no se mostrará; se aplica por renglón)*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        r_id=new_id("R")
+        pdf=pdf_remito(r_id, context.user_data.get("cliente",""), context.user_data.get("items",[]))
+        await (update.callback_query.message.reply_document if from_button else update.message.reply_document)(
+            document=InputFile(io.BytesIO(pdf), filename=f"Remito_{r_id}.pdf"),
+            caption=f"Remito {r_id} listo ✅"
+        )
+        context.user_data.clear()
+
 # ==== Ciclo de vida / Webhook ====
+app = FastAPI()
+
+bot_app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).updater(None).build()
+
 @app.on_event("startup")
 async def on_startup():
     try:
         await bot_app.initialize()
         await bot_app.start()
-        # Limpiar webhook previo y setear si hay BASE_URL https
         await bot_app.bot.delete_webhook(drop_pending_updates=True)
         if BASE_URL and BASE_URL.startswith("https://"):
             url = f"{BASE_URL}/webhook/{TELEGRAM_TOKEN}"
@@ -529,6 +553,7 @@ async def set_webhook():
 bot_app.add_handler(CommandHandler("start", cmd_start))
 bot_app.add_handler(CommandHandler("presupuesto", cmd_presupuesto))
 bot_app.add_handler(CommandHandler("remito", cmd_remito))
+bot_app.add_handler(CallbackQueryHandler(on_button))
 bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, route_text))
 
 if __name__ == "__main__":
