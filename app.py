@@ -51,12 +51,33 @@ def fetch_catalog() -> List[Dict[str, Any]]:
     creds = Credentials.from_service_account_file(GOOGLE_SA_JSON_PATH, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(SPREADSHEET_ID)
-    w  = sh.worksheet("Productos")
-    rows = w.get_all_records()
+
+    ws = None
+    for w in sh.worksheets():
+        if w.title.strip().lower() == "productos":
+            ws = w
+            break
+    if ws is None:
+        raise RuntimeError("No encontré la pestaña 'Productos' en el Google Sheet.")
+
+    rows = ws.get_all_records()
+    if not rows:
+        raise RuntimeError("La pestaña 'Productos' está vacía o sin encabezados.")
+
     out = []
     for r in rows:
-        prod = str(r.get("Producto", "")).strip()
-        price = r.get("Precio", r.get("Precio ($)", 0))
+        prod = (
+            r.get("Producto") or
+            r.get("producto") or
+            r.get("PRODUCTO")
+        )
+        price = (
+            r.get("Precio") or
+            r.get("precio") or
+            r.get("Precio ($)") or
+            r.get("precio ($)")
+        )
+        prod = str(prod or "").strip()
         if isinstance(price, str):
             price = price.replace(".", "").replace(",", ".")
         try:
@@ -65,6 +86,10 @@ def fetch_catalog() -> List[Dict[str, Any]]:
             price = 0.0
         if prod:
             out.append({"Producto": prod, "Precio": price})
+
+    if not out:
+        raise RuntimeError("No se encontraron filas válidas (revisá columnas 'Producto' y 'Precio').")
+
     return out
 
 # ==== Parser ====
@@ -101,7 +126,7 @@ def parse_items(text: str, catalog: List[Dict[str,Any]]) -> Tuple[List[Tuple[Dic
         else: warnings.append(f"⚠️ No entendí “{part}”.")
     return out, warnings
 
-# ==== IA (opcional) ====
+# ==== IA opcional ====
 def ai_extract(text: str) -> Optional[List[Dict[str,Any]]]:
     if not (OPENAI_API_KEY and OpenAI):
         return None
@@ -133,7 +158,7 @@ def load_logo_imagereader() -> Optional[ImageReader]:
 
 LOGO_IR = load_logo_imagereader()
 
-# ==== PDFs ====
+# ==== PDFS ====
 def draw_header(c, title: str):
     W, H = A4
     if LOGO_IR:
@@ -223,7 +248,7 @@ async def route_text(update, context):
         context.user_data["cliente"]=msg
         context.user_data.pop(ASK_CLIENT,None)
         context.user_data[ASK_ITEMS]=True
-        await update.message.reply_text("Enviá los *ítems* (natural, separados por coma o renglón):", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("Enviá los *ítems* (separados por coma o renglón):", parse_mode=ParseMode.MARKDOWN)
         return
     if context.user_data.get(ASK_ITEMS):
         catalog=fetch_catalog()
@@ -252,15 +277,32 @@ async def route_text(update, context):
         context.user_data.clear(); return
     await update.message.reply_text("Usá /presupuesto o /remito.")
 
-# ==== WEBHOOK (solo si BASE_URL es https) ====
+# ==== WEBHOOK Y CICLO DE VIDA ====
 @app.on_event("startup")
 async def on_startup():
-    await bot_app.bot.delete_webhook(drop_pending_updates=True)
-    if BASE_URL.startswith("https://"):
-        url=f"{BASE_URL}/webhook/{TELEGRAM_TOKEN}"
-        await bot_app.bot.set_webhook(url=url)
-    else:
-        print("⚠️ BASE_URL no es https o no configurada — no se registra webhook (Render lo hará después).")
+    try:
+        await bot_app.initialize()
+        await bot_app.start()
+        await bot_app.bot.delete_webhook(drop_pending_updates=True)
+        if BASE_URL and BASE_URL.startswith("https://"):
+            url = f"{BASE_URL}/webhook/{TELEGRAM_TOKEN}"
+            await bot_app.bot.set_webhook(url=url)
+            print(f"[startup] Webhook seteado en: {url}")
+        else:
+            print("[startup] BASE_URL no configurada o sin https. Webhook no seteado (ok para primer deploy).")
+    except Exception as e:
+        import traceback
+        print("[startup][ERROR]", e)
+        print(traceback.format_exc())
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    try:
+        await bot_app.stop()
+        await bot_app.shutdown()
+        print("[shutdown] Application detenida correctamente.")
+    except Exception as e:
+        print("[shutdown][WARN]", e)
 
 @app.post("/webhook/{token}")
 async def webhook(token: str, request: Request):
@@ -275,7 +317,6 @@ async def webhook(token: str, request: Request):
 async def root():
     return {"ok": True, "msg": "Ocaso Bot Presupuestos & Remitos activo"}
 
-# Opcional: endpoint para setear webhook manualmente
 @app.post("/setwebhook")
 async def set_webhook():
     if not BASE_URL.startswith("https://"):
