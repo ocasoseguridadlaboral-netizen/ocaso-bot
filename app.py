@@ -31,7 +31,10 @@ SPREADSHEET_ID = os.getenv("SPREADSHEET_ID")
 GOOGLE_SA_JSON_PATH = os.getenv("GOOGLE_SA_JSON_PATH")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
-LOGO_PATH = "./assets/logo.png"  # logo desde repo
+# rutas robustas para assets
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_PATH_PNG = os.path.join(BASE_DIR, "assets", "logo.png")
+LOGO_PATH_JPG = os.path.join(BASE_DIR, "assets", "logo.jpg")
 
 if not TELEGRAM_TOKEN or not SPREADSHEET_ID or not GOOGLE_SA_JSON_PATH:
     raise RuntimeError("Faltan envs: TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_SA_JSON_PATH")
@@ -43,6 +46,8 @@ EMPRESA_CUIT   = "CUIT: 27-13058782-3"
 EMPRESA_DIR    = "Castelli 45 - San Vicente, Buenos Aires"
 EMPRESA_TEL    = "Tel: 2224501287"
 EMPRESA_MAIL   = "ocasoseguridadlaboral@gmail.com"
+
+FOOTER_TEXT = "Todos los valores incluyen IVA · Validez 10 días · Cualquier consulta, no dudes en escribirnos"
 
 # ==== Google Sheets (solo lectura) ====
 def fetch_catalog() -> List[Dict[str, Any]]:
@@ -118,48 +123,44 @@ def parse_items(text: str, catalog: List[Dict[str,Any]]) -> Tuple[List[Tuple[Dic
         else: warnings.append(f"⚠️ No entendí “{part}”.")
     return out, warnings
 
-# ==== IA opcional ====
-def ai_extract(text: str) -> Optional[List[Dict[str,Any]]]:
-    if not (OPENAI_API_KEY and OpenAI):
-        return None
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    prompt = (
-        "Extrae ítems de este texto de venta de indumentaria en español.\n"
-        "Devuelve JSON con key 'items': [{\"descripcion\": str, \"cantidad\": int}]. SOLO JSON.\n"
-        f"TEXTO:\n{text}"
-    )
-    try:
-        res = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0
-        )
-        data = json.loads(res.choices[0].message.content)
-        return data.get("items")
-    except Exception:
-        return None
-
 # ==== Logo & encabezado ====
 def load_logo_imagereader() -> Optional[ImageReader]:
-    if os.path.exists(LOGO_PATH):
+    path = None
+    if os.path.exists(LOGO_PATH_PNG):
+        path = LOGO_PATH_PNG
+    elif os.path.exists(LOGO_PATH_JPG):
+        path = LOGO_PATH_JPG
+    if path:
         try:
-            return ImageReader(LOGO_PATH)
-        except Exception:
-            pass
-    return None
+            with open(path, "rb") as f:
+                data = f.read()
+            return ImageReader(io.BytesIO(data))
+        except Exception as e:
+            print("[logo] Error al cargar logo:", e)
+            return None
+    else:
+        print("[logo] No se encontró assets/logo.png ni assets/logo.jpg")
+        return None
 
 LOGO_IR = load_logo_imagereader()
 
 TOP_MARGIN_MM = 15
 HEADER_BLOCK_HEIGHT_MM = 30  # alto del bloque
 
+def draw_footer(c: canvas.Canvas):
+    W, H = A4
+    c.setFont("Helvetica-Oblique", 9)
+    c.setFillGray(0.25)
+    c.drawCentredString(W/2, 12*mm, FOOTER_TEXT)
+    c.setFillGray(0)
+
 def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     """
     Encabezado:
-      - Izquierda: logo + datos empresa (sin solaparse)
-      - Derecha (arriba): Fecha/Hora (1ra línea) + Nº (2da línea, chico)
-      - Debajo, alineado a derecha: título del documento grande
-      - Retorna la coordenada Y para iniciar contenido
+      - Izquierda: logo + datos empresa
+      - Derecha (arriba): Fecha/Hora + Nº (chico)
+      - Debajo, derecha: título grande
+      - Retorna Y inicial para contenido
     """
     W, H = A4
     top = H - TOP_MARGIN_MM*mm
@@ -167,11 +168,14 @@ def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     x_right = W - 15*mm
     y = top
 
-    # Logo
+    # Logo (prioriza png, luego jpg)
     if LOGO_IR:
-        c.drawImage(LOGO_IR, x_left, y - 14*mm, width=32*mm, height=14*mm,
-                    preserveAspectRatio=True, mask='auto')
-        y -= 16*mm  # espacio tras el logo
+        try:
+            c.drawImage(LOGO_IR, x_left, y - 14*mm, width=32*mm, height=14*mm,
+                        preserveAspectRatio=True, mask='auto')
+            y -= 16*mm
+        except Exception as e:
+            print("[logo] drawImage error:", e)
 
     # Datos empresa
     c.setFont("Helvetica-Bold", 12)
@@ -186,10 +190,10 @@ def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     # Derecha: Fecha/Hora y Nº (chico)
     now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     c.setFont("Helvetica", 9)
-    c.drawRightString(x_right, top,          f"Fecha: {now_str}")
-    c.drawRightString(x_right, top - 5*mm,   f"Nº: {doc_id}")
+    c.drawRightString(x_right, top,        f"Fecha: {now_str}")
+    c.drawRightString(x_right, top - 5*mm, f"Nº: {doc_id}")
 
-    # Título del documento grande a la derecha
+    # Título grande a la derecha
     c.setFont("Helvetica-Bold", 16)
     c.drawRightString(x_right, top - 12*mm, doc_label)
 
@@ -198,7 +202,7 @@ def draw_header(c: canvas.Canvas, doc_label: str, doc_id: str) -> float:
     c.setLineWidth(0.6)
     c.line(15*mm, sep_y, x_right, sep_y)
 
-    return sep_y - 6*mm  # y inicial para contenido
+    return sep_y - 6*mm
 
 # ==== PDFs ====
 def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int]], desc_pct: float) -> bytes:
@@ -229,6 +233,8 @@ def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int
     for prod, qty in items:
         price_unit = float(prod["Precio"]) * (1 - float(desc_pct)/100.0)  # descuento oculto
         if y < 30*mm:
+            # footer de página anterior
+            draw_footer(c)
             c.showPage()
             content_y = draw_header(c, "Presupuesto", p_id)
             c.setFont("Helvetica", 10)
@@ -247,7 +253,7 @@ def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int
         total += price_unit * qty
         y -= 6*mm
 
-    # Total (sin mostrar descuento)
+    # Total
     y -= 4*mm
     c.setLineWidth(0.4); c.line(120*mm, y, 190*mm, y)
     y -= 8*mm
@@ -255,6 +261,8 @@ def pdf_presupuesto(p_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int
     c.drawString(120*mm, y, "TOTAL:")
     c.drawRightString(190*mm, y, f"${total:,.2f}")
 
+    # footer última página
+    draw_footer(c)
     c.showPage()
     c.save()
     buf.seek(0)
@@ -280,6 +288,7 @@ def pdf_remito(r_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int]]) -
 
     for prod, qty in items:
         if y < 30*mm:
+            draw_footer(c)
             c.showPage()
             content_y = draw_header(c, "Remito", r_id)
             c.setFont("Helvetica", 10)
@@ -295,6 +304,7 @@ def pdf_remito(r_id: str, cliente: str, items: List[Tuple[Dict[str,Any],int]]) -
         c.drawString(140*mm, y, str(qty))
         y -= 6*mm
 
+    draw_footer(c)
     c.showPage()
     c.save()
     buf.seek(0)
@@ -308,15 +318,62 @@ app = FastAPI()
 # Deshabilitamos updater (polling); usaremos webhook en producción
 bot_app: Application = ApplicationBuilder().token(TELEGRAM_TOKEN).updater(None).build()
 
-ASK_CLIENT="ASK_CLIENT"; ASK_ITEMS="ASK_ITEMS"; ASK_DISC="ASK_DISC"; FLOW="FLOW"
+# Estados
+ASK_CLIENT="ASK_CLIENT"
+ASK_ITEMS="ASK_ITEMS"
+ASK_REVIEW="ASK_REVIEW"   # << nuevo paso de confirmación/edición
+ASK_DISC="ASK_DISC"
+FLOW="FLOW"
+
+def render_items_list(pairs: List[Tuple[Dict[str,Any],int]]) -> str:
+    return "\n".join([f"- {p['Producto']} x {q}" for p,q in pairs]) or "(sin ítems)"
+
+def apply_corrections(current: List[Tuple[Dict[str,Any],int]], msg: str, catalog: List[Dict[str,Any]]) -> List[Tuple[Dict[str,Any],int]]:
+    """
+    Reglas simples:
+      - 'eliminar <desc>' -> elimina ítem por mejor coincidencia
+      - '<desc> x <cant>' o '<desc> <cant>' -> agrega o reemplaza cantidad
+    """
+    items = current[:]
+    lines = [ln.strip() for ln in re.split(r"[,\n;]+", msg) if ln.strip()]
+    for ln in lines:
+        m = re.match(r"(?i)^eliminar\s+(.+)$", ln)
+        if m:
+            target = m.group(1).strip()
+            # buscar mejor match dentro de la lista actual
+            best_i = -1; best_score = -1
+            for i,(prod,qty) in enumerate(items):
+                sc = fuzz.WRatio(target.lower(), prod["Producto"].lower())
+                if sc > best_score:
+                    best_score = sc; best_i = i
+            if best_i >= 0:
+                items.pop(best_i)
+            continue
+        # intentar parsear como item nuevo/modificación
+        frag, qty = extract_qty(ln)
+        match = best_match(frag, catalog)
+        if match:
+            # si ya existe, reemplaza cantidad; si no, agrega
+            replaced = False
+            for i,(prod,old_q) in enumerate(items):
+                if prod["Producto"].lower() == match["Producto"].lower():
+                    items[i] = (prod, qty)
+                    replaced = True
+                    break
+            if not replaced:
+                items.append((match, qty))
+    return items
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🤖 *Bot de Presupuestos & Remitos*\n\n"
         "Comandos:\n"
-        "• /presupuesto → cliente → ítems → descuento (oculto por renglón) → PDF con precios\n"
-        "• /remito → cliente → ítems → PDF sin precios\n\n"
-        "Ejemplo:\n`2 pantalones cargo 42 verde, remera negra L x1`",
+        "• /presupuesto → cliente → ítems → revisión/edición → descuento (oculto por renglón) → PDF con precios\n"
+        "• /remito → cliente → ítems → revisión/edición → PDF sin precios\n\n"
+        "Ejemplo:\n`2 pantalones cargo 42 verde, remera negra L x1`\n\n"
+        "Durante la revisión podés enviar correcciones, p.ej.:\n"
+        "• `eliminar remera negra`\n"
+        "• `remera negra L x 2` (cambia cantidad o agrega)",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -331,6 +388,7 @@ async def cmd_remito(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg=(update.message.text or "").strip()
 
+    # Paso 1: cliente
     if context.user_data.get(ASK_CLIENT):
         context.user_data["cliente"]=msg
         context.user_data.pop(ASK_CLIENT,None)
@@ -340,6 +398,7 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN
         ); return
 
+    # Paso 2: entrada de ítems -> pasa a revisión
     if context.user_data.get(ASK_ITEMS):
         catalog = fetch_catalog()
         pairs, warnings = parse_items(msg, catalog)
@@ -350,25 +409,56 @@ async def route_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ); return
 
         context.user_data["items"]=pairs
-        lista = "\n".join([f"- {p['Producto']} x {q}" for p,q in pairs])
+        context.user_data["catalog"]=catalog
+        context.user_data.pop(ASK_ITEMS, None)
+        context.user_data[ASK_REVIEW]=True
 
-        if context.user_data.get(FLOW)=="PRESU":
-            context.user_data[ASK_ITEMS]=False
-            context.user_data[ASK_DISC]=True
+        lista = render_items_list(pairs)
+        warning_text = ("\n\n" + " ".join(warnings)) if warnings else ""
+        await update.message.reply_text(
+            f"Revisión de ítems:\n{lista}{warning_text}\n\n"
+            "¿Está bien? Respondé *ok* para continuar o enviá correcciones.\n"
+            "_Correcciones válidas:_\n"
+            "• `eliminar <descripción>`\n"
+            "• `<descripción> x <cantidad>` (agrega o cambia cantidad)",
+            parse_mode=ParseMode.MARKDOWN
+        ); return
+
+    # Paso 3: revisión/edición (bucle hasta 'ok')
+    if context.user_data.get(ASK_REVIEW):
+        if msg.lower() in ["ok", "listo", "confirmar", "sí", "si"]:
+            context.user_data.pop(ASK_REVIEW, None)
+            if context.user_data.get(FLOW)=="PRESU":
+                context.user_data[ASK_DISC]=True
+                await update.message.reply_text(
+                    "Perfecto. ¿Qué *% de descuento* aplico? (0–100)\n"
+                    "*(el descuento no se mostrará; se aplica por renglón)*",
+                    parse_mode=ParseMode.MARKDOWN
+                ); return
+            else:
+                # remito directo
+                r_id=new_id("R")
+                pdf=pdf_remito(r_id, context.user_data.get("cliente",""), context.user_data.get("items",[]))
+                await update.message.reply_document(
+                    document=InputFile(io.BytesIO(pdf), filename=f"Remito_{r_id}.pdf"),
+                    caption=f"Remito {r_id} listo ✅"
+                )
+                context.user_data.clear()
+                return
+        else:
+            # aplicar correcciones y volver a mostrar lista
+            catalog = context.user_data.get("catalog", fetch_catalog())
+            current = context.user_data.get("items", [])
+            updated = apply_corrections(current, msg, catalog)
+            context.user_data["items"] = updated
+            lista = render_items_list(updated)
             await update.message.reply_text(
-                f"Ítems entendidos:\n{lista}\n\n¿Qué *% de descuento* aplico? (0–100)\n*(no se mostrará; se aplica por renglón)*",
+                f"Lista actualizada:\n{lista}\n\n"
+                "¿Está bien? Respondé *ok* para continuar o enviá más correcciones.",
                 parse_mode=ParseMode.MARKDOWN
             ); return
-        else:
-            r_id=new_id("R")
-            pdf=pdf_remito(r_id, context.user_data.get("cliente",""), pairs)
-            await update.message.reply_document(
-                document=InputFile(io.BytesIO(pdf), filename=f"Remito_{r_id}.pdf"),
-                caption=f"Remito {r_id} listo ✅"
-            )
-            context.user_data.clear()
-            return
 
+    # Paso 4: descuento y emisión de presupuesto
     if context.user_data.get(ASK_DISC):
         try:
             d=float(msg.replace(",","."))
