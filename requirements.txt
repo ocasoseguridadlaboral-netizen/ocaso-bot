@@ -1,0 +1,10 @@
+python-telegram-bot==20.7
+fastapi==0.115.0
+uvicorn==0.30.6
+gspread==6.1.4
+google-auth==2.35.0
+reportlab==4.2.2
+python-dotenv==1.0.1
+rapidfuzz==3.9.7
+openai==1.50.2
+requests==2.32.3
