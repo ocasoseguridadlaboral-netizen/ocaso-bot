@@ -33,8 +33,8 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # opcional
 LOGO_URL       = os.getenv("LOGO_URL")        # opcional (http/https)
 LOGO_PATH      = os.getenv("LOGO_PATH", "./assets/logo.png")  # opcional (archivo en repo)
 
-if not TELEGRAM_TOKEN or not BASE_URL or not SPREADSHEET_ID or not GOOGLE_SA_JSON_PATH:
-    raise RuntimeError("Faltan envs: TELEGRAM_TOKEN, BASE_URL, SPREADSHEET_ID, GOOGLE_SA_JSON_PATH")
+if not TELEGRAM_TOKEN or not SPREADSHEET_ID or not GOOGLE_SA_JSON_PATH:
+    raise RuntimeError("Faltan envs: TELEGRAM_TOKEN, SPREADSHEET_ID, GOOGLE_SA_JSON_PATH")
 
 # Datos de la empresa (encabezado)
 EMPRESA_NOMBRE = "Zabalza Gladys Beatriz"
